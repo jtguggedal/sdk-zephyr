@@ -18,7 +18,10 @@
 #include <nrf_erratas.h>
 
 #include "soc_flash_nrf.h"
-
+#if defined(CONFIG_BUILD_WITH_TFM)
+#include <tfm/tfm_ioctl_api.h>
+#include <pm_config.h>
+#endif
 #define LOG_LEVEL CONFIG_FLASH_LOG_LEVEL
 #include <logging/log.h>
 LOG_MODULE_REGISTER(flash_nrf);
@@ -141,6 +144,11 @@ static void nvmc_wait_ready(void)
 static int flash_nrf_read(const struct device *dev, off_t addr,
 			    void *data, size_t len)
 {
+#if CONFIG_ARM_NONSECURE_FIRMWARE && USE_PARTITION_MANAGER && CONFIG_BUILD_WITH_TFM
+	uint32_t err = 0;
+	enum tfm_platform_err_t plt_err;
+#endif
+
 	if (is_regular_addr_valid(addr, len)) {
 		addr += DT_REG_ADDR(SOC_NV_FLASH_NODE);
 	} else if (!is_uicr_addr_valid(addr, len)) {
@@ -158,8 +166,18 @@ static int flash_nrf_read(const struct device *dev, off_t addr,
 	if (addr < PM_APP_ADDRESS) {
 		return spm_request_read(data, addr, len);
 	}
+#elif CONFIG_ARM_NONSECURE_FIRMWARE && USE_PARTITION_MANAGER && CONFIG_BUILD_WITH_TFM
+	if (addr < PM_APP_ADDRESS) {
+		plt_err = tfm_platform_mem_read(data, addr, len, &err);
+		if (plt_err != TFM_PLATFORM_ERR_SUCCESS || err != 0) {
+			LOG_ERR("tfm_..._mem_read failed: plt_err: 0x%x, err: 0x%x\n",
+				plt_err, err);
+			return -1;
+		} else {
+			return 0;
+		}
+	}
 #endif
-
 	memcpy(data, (void *)addr, len);
 
 	return 0;
