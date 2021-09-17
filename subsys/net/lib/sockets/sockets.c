@@ -148,7 +148,8 @@ static void zsock_flush_queue(struct net_context *ctx)
 	k_fifo_cancel_wait(&ctx->recv_q);
 }
 
-int zsock_socket_internal(int family, int type, int proto)
+#if defined(CONFIG_NET_NATIVE)
+static int zsock_socket_internal(int family, int type, int proto)
 {
 	int fd = z_reserve_fd();
 	struct net_context *ctx;
@@ -206,6 +207,7 @@ int zsock_socket_internal(int family, int type, int proto)
 
 	return fd;
 }
+#endif /* CONFIG_NET_NATIVE */
 
 int z_impl_zsock_socket(int family, int type, int proto)
 {
@@ -222,10 +224,6 @@ int z_impl_zsock_socket(int family, int type, int proto)
 		}
 
 		return sock_family->handler(family, type, proto);
-	}
-
-	if (IS_ENABLED(CONFIG_NET_NATIVE)) {
-		return zsock_socket_internal(family, type, proto);
 	}
 
 	errno = EAFNOSUPPORT;
