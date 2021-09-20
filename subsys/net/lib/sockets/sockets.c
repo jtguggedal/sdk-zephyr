@@ -2195,3 +2195,17 @@ const struct socket_op_vtable sock_fd_op_vtable = {
 	.setsockopt = sock_setsockopt_vmeth,
 	.getsockname = sock_getsockname_vmeth,
 };
+
+#if defined(CONFIG_NET_NATIVE)
+static bool inet_is_supported(int family, int type, int proto)
+{
+	if (family != AF_INET && family != AF_INET6) {
+		return false;
+	}
+
+	return true;
+}
+
+NET_SOCKET_REGISTER(af_inet46, NET_SOCKET_DEFAULT_PRIO, AF_UNSPEC,
+		    inet_is_supported, zsock_socket_internal);
+#endif /* CONFIG_NET_NATIVE */
