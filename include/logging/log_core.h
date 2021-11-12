@@ -302,11 +302,6 @@ static inline char z_log_minimal_level_to_char(int level)
 	} \
 	\
 	bool is_user_context = k_is_user_context(); \
-	uint32_t filters = IS_ENABLED(CONFIG_LOG_RUNTIME_FILTERING) ? \
-						(_dsource)->filters : 0;\
-	if (!LOG_CHECK_CTX_LVL_FILTER(is_user_context, _level, filters)) { \
-		break; \
-	} \
 	if (IS_ENABLED(CONFIG_LOG2)) { \
 		int _mode; \
 		void *_src = IS_ENABLED(CONFIG_LOG_RUNTIME_FILTERING) ? \
@@ -346,16 +341,11 @@ static inline char z_log_minimal_level_to_char(int level)
 		break; \
 	} \
 	bool is_user_context = k_is_user_context(); \
-	uint32_t filters = IS_ENABLED(CONFIG_LOG_RUNTIME_FILTERING) ? \
-						(_dsource)->filters : 0;\
 	\
 	if (IS_ENABLED(CONFIG_LOG_MINIMAL)) { \
 		Z_LOG_TO_PRINTK(_level, "%s", _str); \
 		z_log_minimal_hexdump_print(_level, \
 					    (const char *)_data, _len);\
-		break; \
-	} \
-	if (!LOG_CHECK_CTX_LVL_FILTER(is_user_context, _level, filters)) { \
 		break; \
 	} \
 	if (IS_ENABLED(CONFIG_LOG2)) { \

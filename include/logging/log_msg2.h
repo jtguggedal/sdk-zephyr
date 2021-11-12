@@ -424,11 +424,6 @@ do { \
 					  _level, (uint8_t *)_data, _dlen,\
 					  Z_LOG_FMT_ARGS(_fmt, ##__VA_ARGS__));\
 		_mode = Z_LOG_MSG2_MODE_RUNTIME; \
-	} else if (IS_ENABLED(CONFIG_LOG_SPEED) && _try_0cpy && ((_dlen) == 0)) {\
-		LOG_MSG2_DBG("create zero-copy message\n");\
-		Z_LOG_MSG2_SIMPLE_CREATE(_domain_id, _source, \
-					_level, Z_LOG_FMT_ARGS(_fmt, ##__VA_ARGS__)); \
-		_mode = Z_LOG_MSG2_MODE_ZERO_COPY; \
 	} else { \
 		LOG_MSG2_DBG("create on stack message\n");\
 		Z_LOG_MSG2_STACK_CREATE(_domain_id, _source, _level, _data, \
