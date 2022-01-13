@@ -1506,3 +1506,129 @@ end_of_operation:
 
 	return ret;
 }
+
+static uint8_t json_parse_composite_read_paths(struct lwm2m_message *msg,
+					       struct lwm2m_obj_path path_list[],
+					       uint8_t path_list_size)
+{
+	struct json_in_formatter_data fd;
+	bool path_valid;
+	int ret;
+	uint8_t name[MAX_RESOURCE_LEN];
+	uint8_t base_name[MAX_RESOURCE_LEN];
+	uint8_t full_name[MAX_RESOURCE_LEN];
+	uint8_t valid_path_cnt = 0;
+
+	while (json_next_token(&msg->in, &fd)) {
+		if (!(fd.json_flags & T_VALUE)) {
+			continue;
+		}
+
+		path_valid = false;
+		switch (json_atribute_decode(&msg->in, &fd)) {
+		case SENML_JSON_BASE_NAME_ATTRIBUTE:
+			if (fd.value_len >= sizeof(base_name)) {
+				LOG_ERR("Base name too long");
+				break;
+			}
+
+			if (buf_read(base_name, fd.value_len, CPKT_BUF_READ(msg->in.in_cpkt),
+				     &fd.value_offset) < 0) {
+				LOG_ERR("Error parsing base name!");
+				break;
+			}
+
+			base_name[fd.value_len] = '\0';
+
+			/* Relative name is optional - preinitialize full name with base name */
+			snprintk(full_name, sizeof(full_name), "%s", base_name);
+
+			if (fd.json_flags & T_OBJECT_END) {
+				path_valid = true;
+			}
+			break;
+
+		case SENML_JSON_NAME_ATTRIBUTE:
+
+			/* handle resource name */
+			if (fd.value_len >= MAX_RESOURCE_LEN) {
+				LOG_ERR("Relative name too long");
+				break;
+			}
+
+			/* get value for relative path */
+			if (buf_read(name, fd.value_len, CPKT_BUF_READ(msg->in.in_cpkt),
+				     &fd.value_offset) < 0) {
+				LOG_ERR("Error parsing relative path!");
+				break;
+			}
+
+			name[fd.value_len] = '\0';
+
+			/* combine base_name + name */
+			snprintk(full_name, sizeof(full_name), "%s%s", base_name, name);
+			path_valid = true;
+			break;
+
+		default:
+			break;
+		}
+
+		if (path_valid && valid_path_cnt < path_list_size) {
+			ret = parse_path(full_name, strlen(full_name), &path_list[valid_path_cnt]);
+			if (ret >= 0) {
+				path_list[valid_path_cnt].level = ret;
+				valid_path_cnt++;
+			}
+		}
+	}
+	return valid_path_cnt;
+}
+
+int do_composite_read_op_senml_json(struct lwm2m_message *msg)
+{
+	int ret;
+	struct json_out_formatter_data fd;
+	struct lwm2m_obj_path path_list[CONFIG_LWM2M_COMPOSITE_PATH_LIST_SIZE];
+	uint8_t path_list_size;
+
+	path_list_size = json_parse_composite_read_paths(msg, path_list,
+							 CONFIG_LWM2M_COMPOSITE_PATH_LIST_SIZE);
+	if (path_list_size == 0) {
+		LOG_ERR("No Valid Url at msg");
+		return -ESRCH;
+	}
+
+	(void)memset(&fd, 0, sizeof(fd));
+	engine_set_out_user_data(&msg->out, &fd);
+
+	/* Detect longest match base name to url */
+	lwm2m_define_longest_match_url_for_base_name(&fd, path_list, path_list_size);
+
+	/* Init message here ready for response */
+
+	ret = lwm2m_perform_composite_read_op(msg, LWM2M_FORMAT_APP_SEML_JSON, path_list,
+					      path_list_size);
+	engine_clear_out_user_data(&msg->out);
+
+	return ret;
+}
+
+int do_send_op_senml_json(struct lwm2m_message *msg, struct lwm2m_obj_path path_list[],
+			  uint8_t path_list_size)
+{
+	struct json_out_formatter_data fd;
+	int ret;
+
+	(void)memset(&fd, 0, sizeof(fd));
+	engine_set_out_user_data(&msg->out, &fd);
+
+	/* Detect longest match base name to url */
+	lwm2m_define_longest_match_url_for_base_name(&fd, path_list, path_list_size);
+
+	ret = lwm2m_perform_composite_read_op(msg, LWM2M_FORMAT_APP_SEML_JSON, path_list,
+					      path_list_size);
+	engine_clear_out_user_data(&msg->out);
+
+	return ret;
+}

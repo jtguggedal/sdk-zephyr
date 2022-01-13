@@ -112,6 +112,8 @@ static sys_slist_t engine_obj_list;
 static sys_slist_t engine_obj_inst_list;
 static sys_slist_t engine_service_list;
 
+#define LWM2M_DP_CLIENT_URI "dp"
+
 static K_KERNEL_STACK_DEFINE(engine_thread_stack,
 			      CONFIG_LWM2M_ENGINE_STACK_SIZE);
 static struct k_thread engine_thread_data;
@@ -3132,13 +3134,96 @@ static bool lwm2m_validate_engine_end(uint16_t content_format)
 	return false;
 }
 
+static int lwm2m_perform_read_object_instance(struct lwm2m_message *msg,
+					      struct lwm2m_engine_obj_inst *obj_inst,
+					      uint8_t *num_read)
+{
+	struct lwm2m_engine_res *res = NULL;
+	struct lwm2m_engine_obj_field *obj_field;
+	int ret = 0;
+
+	while (obj_inst) {
+		if (!obj_inst->resources || obj_inst->resource_count == 0U) {
+			goto move_forward;
+		}
+
+		/* update the obj_inst_id as we move through the instances */
+		msg->path.obj_inst_id = obj_inst->obj_inst_id;
+
+		if (msg->path.level <= 1U) {
+			/* start instance formatting */
+			engine_put_begin_oi(&msg->out, &msg->path);
+		}
+
+		for (int index = 0; index < obj_inst->resource_count; index++) {
+			if (msg->path.level > 2 &&
+			    msg->path.res_id != obj_inst->resources[index].res_id) {
+				continue;
+			}
+
+			res = &obj_inst->resources[index];
+			msg->path.res_id = res->res_id;
+			obj_field = lwm2m_get_engine_obj_field(obj_inst->obj, res->res_id);
+			if (!obj_field) {
+				ret = -ENOENT;
+			} else if (!LWM2M_HAS_PERM(obj_field, LWM2M_PERM_R)) {
+				ret = -EPERM;
+			} else {
+				/* start resource formatting */
+				engine_put_begin_r(&msg->out, &msg->path);
+
+				/* perform read operation on this resource */
+				ret = lwm2m_read_handler(obj_inst, res, obj_field, msg);
+				if (ret < 0) {
+					if (ret == -ENOMEM) {
+						/* Read Opeartion have been failed */
+						return ret;
+					}
+
+					/* ignore errors unless single read */
+					if (msg->path.level > 2 &&
+					    !LWM2M_HAS_PERM(obj_field, BIT(LWM2M_FLAG_OPTIONAL))) {
+						LOG_ERR("READ OP: %d", ret);
+					}
+				} else {
+					*num_read += 1U;
+				}
+
+				/* end resource formatting */
+				engine_put_end_r(&msg->out, &msg->path);
+			}
+
+			/* on single read break if errors */
+			if (ret < 0 && msg->path.level > 2U) {
+				break;
+			}
+
+			/* when reading multiple resources ignore return code */
+			ret = 0;
+		}
+
+move_forward:
+		if (msg->path.level <= 1U) {
+			/* end instance formatting */
+			engine_put_end_oi(&msg->out, &msg->path);
+		}
+
+		if (msg->path.level <= 1U) {
+			/* advance to the next object instance */
+			obj_inst = next_engine_obj_inst(msg->path.obj_id, obj_inst->obj_inst_id);
+		} else {
+			obj_inst = NULL;
+		}
+	}
+
+	return ret;
+}
+
 int lwm2m_perform_read_op(struct lwm2m_message *msg, uint16_t content_format)
 {
 	struct lwm2m_engine_obj_inst *obj_inst = NULL;
-	struct lwm2m_engine_res *res = NULL;
-	struct lwm2m_engine_obj_field *obj_field;
 	struct lwm2m_obj_path temp_path;
-	int ret = 0, index;
+	int ret = 0;
 	uint8_t num_read = 0U;
 
 	if (msg->path.level >= 2U) {
@@ -3170,92 +3255,12 @@ int lwm2m_perform_read_op(struct lwm2m_message *msg, uint16_t content_format)
 
 	/* store original path values so we can change them during processing */
 	memcpy(&temp_path, &msg->path, sizeof(temp_path));
+
 	engine_put_begin(&msg->out, &msg->path);
 
-	while (obj_inst) {
-		if (!obj_inst->resources || obj_inst->resource_count == 0U) {
-			goto move_forward;
-		}
-
-		/* update the obj_inst_id as we move through the instances */
-		msg->path.obj_inst_id = obj_inst->obj_inst_id;
-
-		if (msg->path.level <= 1U) {
-			/* start instance formatting */
-			engine_put_begin_oi(&msg->out, &msg->path);
-		}
-
-		for (index = 0; index < obj_inst->resource_count; index++) {
-			if (msg->path.level > 2 &&
-			    msg->path.res_id !=
-					obj_inst->resources[index].res_id) {
-				continue;
-			}
-
-			res = &obj_inst->resources[index];
-
-			/*
-			 * On an entire object instance, we need to set path's
-			 * res_id for lwm2m_read_handler to read this specific
-			 * resource.
-			 */
-			msg->path.res_id = res->res_id;
-			obj_field = lwm2m_get_engine_obj_field(obj_inst->obj,
-							       res->res_id);
-			if (!obj_field) {
-				ret = -ENOENT;
-			} else if (!LWM2M_HAS_PERM(obj_field, LWM2M_PERM_R)) {
-				ret = -EPERM;
-			} else {
-				/* start resource formatting */
-				engine_put_begin_r(&msg->out, &msg->path);
-
-				/* perform read operation on this resource */
-				ret = lwm2m_read_handler(obj_inst, res,
-							 obj_field, msg);
-				if (ret < 0) {
-
-					if (ret == -ENOMEM) {
-						/* Read Opeartion have been failed */
-						return ret;
-					}
-
-					/* ignore errors unless single read */
-					if (msg->path.level > 2 &&
-					    !LWM2M_HAS_PERM(obj_field,
-						BIT(LWM2M_FLAG_OPTIONAL))) {
-						LOG_ERR("READ OP: %d", ret);
-					}
-				} else {
-					num_read += 1U;
-				}
-
-				/* end resource formatting */
-				engine_put_end_r(&msg->out, &msg->path);
-			}
-
-			/* on single read break if errors */
-			if (ret < 0 && msg->path.level > 2) {
-				break;
-			}
-
-			/* when reading multiple resources ignore return code */
-			ret = 0;
-		}
-
-move_forward:
-		if (msg->path.level <= 1U) {
-			/* end instance formatting */
-			engine_put_end_oi(&msg->out, &msg->path);
-		}
-
-		if (msg->path.level <= 1U) {
-			/* advance to the next object instance */
-			obj_inst = next_engine_obj_inst(msg->path.obj_id,
-							obj_inst->obj_inst_id);
-		} else {
-			obj_inst = NULL;
-		}
+	ret = lwm2m_perform_read_object_instance(msg, obj_inst, &num_read);
+	if (ret < 0) {
+		return ret;
 	}
 
 	if (engine_put_end(&msg->out, &msg->path) == 0 &&
@@ -4996,6 +5001,186 @@ static int lwm2m_engine_init(const struct device *dev)
 	LOG_DBG("LWM2M engine socket receive thread started");
 
 	return 0;
+}
+
+int lwm2m_perform_composite_read_op(struct lwm2m_message *msg, uint16_t content_format,
+				    struct lwm2m_obj_path path_list[], uint8_t path_list_size)
+{
+	struct lwm2m_engine_obj_inst *obj_inst = NULL;
+	int ret = 0;
+	uint8_t num_read = 0U;
+
+	/* set output content-format */
+	ret = coap_append_option_int(msg->out.out_cpkt, COAP_OPTION_CONTENT_FORMAT, content_format);
+	if (ret < 0) {
+		LOG_ERR("Error setting response content-format: %d", ret);
+		return ret;
+	}
+
+	ret = coap_packet_append_payload_marker(msg->out.out_cpkt);
+	if (ret < 0) {
+		LOG_ERR("Error appending payload marker: %d", ret);
+		return ret;
+	}
+
+	/* Add object start mark */
+	engine_put_begin(&msg->out, &msg->path);
+
+	/* Read resource from path */
+	for (int i = 0; i < path_list_size; i++) {
+		/* Copy path to message path */
+		memcpy(&msg->path, &path_list[i], sizeof(struct lwm2m_obj_path));
+
+
+		if (msg->path.level >= 2U) {
+			obj_inst = get_engine_obj_inst(msg->path.obj_id, msg->path.obj_inst_id);
+		} else if (msg->path.level == 1U) {
+			/* find first obj_inst with path's obj_id */
+			obj_inst = next_engine_obj_inst(msg->path.obj_id, -1);
+		}
+
+		if (!obj_inst) {
+			return -ENOENT;
+		}
+
+		ret = lwm2m_perform_read_object_instance(msg, obj_inst, &num_read);
+		if (ret) {
+			return ret;
+		}
+	}
+
+	/* Add object end mark */
+	if (engine_put_end(&msg->out, &msg->path) == 0 &&
+	    lwm2m_validate_engine_end(content_format)) {
+		LOG_ERR("No space for End marker");
+		return -ENOMEM;
+	}
+
+	/* did not read anything even if we should have - on single item */
+	if (ret == 0 && num_read == 0U && msg->path.level == 3U) {
+		return -ENOENT;
+	}
+
+	return ret;
+}
+
+static int do_send_op(struct lwm2m_message *msg, uint16_t content_format,
+		      struct lwm2m_obj_path path_list[], uint8_t path_list_size)
+{
+	switch (content_format) {
+#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
+	case LWM2M_FORMAT_APP_SEML_JSON:
+		return do_send_op_senml_json(msg, path_list, path_list_size);
+#endif
+
+	default:
+		LOG_ERR("Unsupported content-format for /dp: %u", content_format);
+		return -ENOMSG;
+	}
+}
+
+static int do_send_reply_cb(const struct coap_packet *response,
+				 struct coap_reply *reply,
+				 const struct sockaddr *from)
+{
+	uint8_t code;
+
+	code = coap_header_get_code(response);
+	LOG_DBG("Send callback (code:%u.%u)",
+		COAP_RESPONSE_CODE_CLASS(code),
+		COAP_RESPONSE_CODE_DETAIL(code));
+
+	if (code == COAP_RESPONSE_CODE_CHANGED) {
+		LOG_INF("Send done!");
+		return 0;
+	}
+
+	LOG_ERR("Failed with code %u.%u. Not Retrying.",
+		COAP_RESPONSE_CODE_CLASS(code), COAP_RESPONSE_CODE_DETAIL(code));
+
+	return 0;
+}
+
+static void do_send_timeout_cb(struct lwm2m_message *msg)
+{
+	LOG_WRN("Send Timeout");
+
+}
+
+int lwm2m_engine_send(struct lwm2m_ctx *ctx, char *path_list[], uint8_t path_list_size)
+{
+	struct lwm2m_obj_path path[CONFIG_LWM2M_COMPOSITE_PATH_LIST_SIZE];
+	struct lwm2m_message *msg;
+	int ret;
+	uint16_t content_format;
+
+	if (path_list_size > CONFIG_LWM2M_COMPOSITE_PATH_LIST_SIZE) {
+		return -E2BIG;
+	}
+
+	/* Select content format use CBOR when it possible */
+	if (IS_ENABLED(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)) {
+		content_format = LWM2M_FORMAT_APP_SEML_JSON;
+	} else {
+		LOG_WRN("SenML CBOR or JSON is not supported");
+		return -ENOTSUP;
+	}
+
+	/* Parse Path to internal used object path format */
+	for (int i = 0; i < path_list_size; i++) {
+		ret = string_to_path(path_list[i], path + i, '/');
+		if (ret < 0) {
+			return ret;
+		}
+	}
+
+	/* Allocate Message buffer */
+	msg = lwm2m_get_message(ctx);
+	if (!msg) {
+		LOG_ERR("Unable to get a lwm2m message!");
+		return -ENOMEM;
+	}
+
+	msg->type = COAP_TYPE_CON;
+	msg->code = COAP_METHOD_POST;
+	msg->mid = coap_next_id();
+	msg->tkl = LWM2M_MSG_TOKEN_GENERATE_NEW;
+	msg->reply_cb = do_send_reply_cb;
+	msg->message_timeout_cb = do_send_timeout_cb;
+	msg->out.out_cpkt = &msg->cpkt;
+
+	ret = lwm2m_init_message(msg);
+	if (ret) {
+		goto cleanup;
+	}
+
+
+	ret = select_writer(&msg->out, content_format);
+	if (ret) {
+		goto cleanup;
+	}
+
+	ret = coap_packet_append_option(&msg->cpkt, COAP_OPTION_URI_PATH,
+					LWM2M_DP_CLIENT_URI,
+					strlen(LWM2M_DP_CLIENT_URI));
+	if (ret < 0) {
+		goto cleanup;
+	}
+
+	/* Write requested path data */
+	ret = do_send_op(msg, content_format, path, path_list_size);
+	if (ret < 0) {
+		LOG_ERR("error in multi-format read (err:%d)", ret);
+		goto cleanup;
+	}
+	LOG_INF("Send op to server (/dp)");
+	lwm2m_send_message_async(msg);
+
+	return 0;
+cleanup:
+	lwm2m_reset_message(msg, true);
+	return ret;
+
 }
 
 SYS_INIT(lwm2m_engine_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
