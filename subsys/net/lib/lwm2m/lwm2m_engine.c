@@ -44,6 +44,9 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #include "lwm2m_rw_plain_text.h"
 #include "lwm2m_rw_oma_tlv.h"
 #include "lwm2m_util.h"
+#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
+#include "lwm2m_rw_senml_json.h"
+#endif
 #ifdef CONFIG_LWM2M_RW_JSON_SUPPORT
 #include "lwm2m_rw_json.h"
 #endif
@@ -251,6 +254,9 @@ static int init_block_ctx(const uint8_t *token, uint8_t tkl,
 	(*ctx)->timestamp = timestamp;
 	(*ctx)->expected = 0;
 	(*ctx)->last_block = false;
+#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
+	lwm2m_senml_json_context_init(&(*ctx)->senml_json_ctx);
+#endif
 	memset(&(*ctx)->opaque, 0, sizeof((*ctx)->opaque));
 
 	return 0;
@@ -1172,6 +1178,12 @@ static int select_writer(struct lwm2m_output_context *out, uint16_t accept)
 		break;
 #endif
 
+#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
+	case LWM2M_FORMAT_APP_SEML_JSON:
+		out->writer = &senml_json_writer;
+		break;
+#endif
+
 	default:
 		LOG_WRN("Unknown content type %u", accept);
 		return -ENOMSG;
@@ -1200,6 +1212,13 @@ static int select_reader(struct lwm2m_input_context *in, uint16_t format)
 	case LWM2M_FORMAT_OMA_JSON:
 	case LWM2M_FORMAT_OMA_OLD_JSON:
 		in->reader = &json_reader;
+		break;
+#endif
+
+
+#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
+	case LWM2M_FORMAT_APP_SEML_JSON:
+		in->reader = &senml_json_reader;
 		break;
 #endif
 
@@ -2279,68 +2298,70 @@ static int lwm2m_read_handler(struct lwm2m_engine_obj_inst *obj_inst,
 			return -ENOENT;
 		}
 
+		size_t read_put_data_length;
+
 		switch (obj_field->data_type) {
 
 		case LWM2M_RES_TYPE_OPAQUE:
-			engine_put_opaque(&msg->out, &msg->path,
+			read_put_data_length = engine_put_opaque(&msg->out, &msg->path,
 					  (uint8_t *)data_ptr,
 					  data_len);
 			break;
 
 		case LWM2M_RES_TYPE_STRING:
-			engine_put_string(&msg->out, &msg->path,
+			read_put_data_length = engine_put_string(&msg->out, &msg->path,
 					  (uint8_t *)data_ptr,
 					  strlen((uint8_t *)data_ptr));
 			break;
 
 		case LWM2M_RES_TYPE_U32:
 		case LWM2M_RES_TYPE_TIME:
-			engine_put_s64(&msg->out, &msg->path,
+			read_put_data_length = engine_put_s64(&msg->out, &msg->path,
 				       (int64_t)*(uint32_t *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_U16:
-			engine_put_s32(&msg->out, &msg->path,
+			read_put_data_length = engine_put_s32(&msg->out, &msg->path,
 				       (int32_t)*(uint16_t *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_U8:
-			engine_put_s16(&msg->out, &msg->path,
+			read_put_data_length = engine_put_s16(&msg->out, &msg->path,
 				       (int16_t)*(uint8_t *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_S64:
-			engine_put_s64(&msg->out, &msg->path,
+			read_put_data_length = engine_put_s64(&msg->out, &msg->path,
 				       *(int64_t *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_S32:
-			engine_put_s32(&msg->out, &msg->path,
+			read_put_data_length = engine_put_s32(&msg->out, &msg->path,
 				       *(int32_t *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_S16:
-			engine_put_s16(&msg->out, &msg->path,
+			read_put_data_length = engine_put_s16(&msg->out, &msg->path,
 				       *(int16_t *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_S8:
-			engine_put_s8(&msg->out, &msg->path,
+			read_put_data_length = engine_put_s8(&msg->out, &msg->path,
 				      *(int8_t *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_BOOL:
-			engine_put_bool(&msg->out, &msg->path,
+			read_put_data_length = engine_put_bool(&msg->out, &msg->path,
 					*(bool *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_FLOAT:
-			engine_put_float(&msg->out, &msg->path,
+			read_put_data_length = engine_put_float(&msg->out, &msg->path,
 					 (double *)data_ptr);
 			break;
 
 		case LWM2M_RES_TYPE_OBJLNK:
-			engine_put_objlnk(&msg->out, &msg->path,
+			read_put_data_length = engine_put_objlnk(&msg->out, &msg->path,
 					  (struct lwm2m_objlnk *)data_ptr);
 			break;
 
@@ -2349,6 +2370,12 @@ static int lwm2m_read_handler(struct lwm2m_engine_obj_inst *obj_inst,
 				obj_field->data_type);
 			return -EINVAL;
 
+		}
+
+		/* Validate that we really read some data */
+		if (read_put_data_length == 0) {
+			LOG_ERR("Read operation fail");
+			return -ENOMEM;
 		}
 	}
 
@@ -3077,11 +3104,32 @@ static int do_read_op(struct lwm2m_message *msg, uint16_t content_format)
 		return do_read_op_json(msg, content_format);
 #endif
 
+
+#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
+	case LWM2M_FORMAT_APP_SEML_JSON:
+		return do_read_op_senml_json(msg);
+#endif
+
 	default:
 		LOG_ERR("Unsupported content-format: %u", content_format);
 		return -ENOMSG;
 
 	}
+}
+
+static bool lwm2m_validate_engine_end(uint16_t content_format)
+{
+	switch (content_format) {
+	case LWM2M_FORMAT_APP_JSON:
+	case LWM2M_FORMAT_OMA_OLD_JSON:
+	case LWM2M_FORMAT_APP_SEML_JSON:
+
+		return true;
+
+	default:
+		break;
+	}
+	return false;
 }
 
 int lwm2m_perform_read_op(struct lwm2m_message *msg, uint16_t content_format)
@@ -3166,6 +3214,12 @@ int lwm2m_perform_read_op(struct lwm2m_message *msg, uint16_t content_format)
 				ret = lwm2m_read_handler(obj_inst, res,
 							 obj_field, msg);
 				if (ret < 0) {
+
+					if (ret == -ENOMEM) {
+						/* Read Opeartion have been failed */
+						return ret;
+					}
+
 					/* ignore errors unless single read */
 					if (msg->path.level > 2 &&
 					    !LWM2M_HAS_PERM(obj_field,
@@ -3204,7 +3258,11 @@ move_forward:
 		}
 	}
 
-	engine_put_end(&msg->out, &msg->path);
+	if (engine_put_end(&msg->out, &msg->path) == 0 &&
+	    lwm2m_validate_engine_end(content_format)) {
+		LOG_ERR("No space for End marker");
+		return -ENOMEM;
+	}
 
 	/* restore original path values */
 	memcpy(&msg->path, &temp_path, sizeof(temp_path));
@@ -3464,6 +3522,11 @@ static int do_write_op(struct lwm2m_message *msg,
 	case LWM2M_FORMAT_OMA_JSON:
 	case LWM2M_FORMAT_OMA_OLD_JSON:
 		return do_write_op_json(msg);
+#endif
+
+#if defined(CONFIG_LWM2M_RW_SENML_JSON_SUPPORT)
+	case LWM2M_FORMAT_APP_SEML_JSON:
+		return do_write_op_senml_json(msg);
 #endif
 
 	default:
