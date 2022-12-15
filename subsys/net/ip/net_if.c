@@ -320,6 +320,22 @@ static bool net_if_tx(struct net_if *iface, struct net_pkt *pkt)
 	return true;
 }
 
+/**
+ * @brief Retrieves the connectivity struct for a provided iface if it exists.
+ *
+ * @param iface - network interface to obtain the connectivity struct for.
+ * @return struct net_if_conn* Pointer to the retrieved connectivity struct if it exists,
+ * 	   NULL otherwise.
+ */
+static inline struct net_if_conn* net_if_get_conn(struct net_if* iface) {
+	STRUCT_SECTION_FOREACH(net_if_conn, conn) {
+		if (iface->if_dev == conn->if_dev) {
+			return conn;
+		}
+	}
+	return NULL;
+}
+
 void net_process_tx_packet(struct net_pkt *pkt)
 {
 	struct net_if *iface;
@@ -4186,6 +4202,10 @@ done:
 	net_mgmt_event_notify(NET_EVENT_IF_ADMIN_UP, iface);
 	update_operational_state(iface);
 
+	/* Initiate connection too if autoconnect is enabled */
+	if (!net_if_flag_is_set(iface, NET_IF_NO_AUTO_CONNECT)) {
+		(void)net_if_connect(iface);
+	}
 out:
 	k_mutex_unlock(&lock);
 
@@ -4223,6 +4243,60 @@ done:
 	net_if_flag_clear(iface, NET_IF_UP);
 	net_mgmt_event_notify(NET_EVENT_IF_ADMIN_DOWN, iface);
 	update_operational_state(iface);
+
+out:
+	k_mutex_unlock(&lock);
+
+	return status;
+}
+
+int net_if_connect(struct net_if *iface)
+{
+	NET_DBG("iface %p connect", iface);
+
+	const struct net_if_conn *connectivity = net_if_get_conn(iface);
+
+	if (!connectivity || !(connectivity->api) || !(connectivity->api->connect)) {
+		return -ENOTSUP;
+	}
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	int status = 0;
+
+	if (!net_if_flag_is_set(iface, NET_IF_UP)) {
+		status = -ESHUTDOWN;
+		goto out;
+	}
+
+	status = connectivity->api->connect(iface);
+
+out:
+	k_mutex_unlock(&lock);
+
+	return status;
+}
+
+int net_if_disconnect(struct net_if *iface)
+{
+	NET_DBG("iface %p disconnect", iface);
+
+	const struct net_if_conn *connectivity = net_if_get_conn(iface);
+
+	if (!connectivity || !(connectivity->api) || !(connectivity->api->disconnect)) {
+		return -ENOTSUP;
+	}
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	int status = 0;
+
+	if (!net_if_flag_is_set(iface, NET_IF_UP)) {
+		status = -EALREADY;
+		goto out;
+	}
+
+	status = connectivity->api->disconnect(iface);
 
 out:
 	k_mutex_unlock(&lock);
@@ -4355,6 +4429,113 @@ bool net_if_is_promisc(struct net_if *iface)
 	NET_ASSERT(iface);
 
 	return net_if_flag_is_set(iface, NET_IF_PROMISC);
+}
+
+bool net_if_supports_connectivity(struct net_if *iface)
+{
+	return net_if_get_conn(iface) != NULL;
+}
+
+int net_if_get_conn_opt(struct net_if *iface, int optname, const void *optval, size_t *optlen)
+{
+	const struct net_if_conn *connectivity = net_if_get_conn(iface);
+
+	if (!connectivity || !(connectivity->api) || !(connectivity->api->get_opt)) {
+		return -ENOTSUP;
+	}
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	int status = connectivity->api->get_opt(optname, optval, optlen);
+
+	k_mutex_unlock(&lock);
+
+	return status;
+}
+
+int net_if_set_conn_opt(struct net_if *iface, int optname, const void *optval, size_t optlen)
+{
+	const struct net_if_conn *connectivity = net_if_get_conn(iface);
+
+	if (!connectivity || !(connectivity->api) || !(connectivity->api->set_opt)) {
+		return -ENOTSUP;
+	}
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	int status = connectivity->api->set_opt(optname, optval, optlen);
+
+	k_mutex_unlock(&lock);
+
+	return status;
+}
+
+bool net_if_get_conn_persistence(struct net_if *iface)
+{
+	const struct net_if_conn *connectivity = net_if_get_conn(iface);
+
+	if (!connectivity) {
+		return false;
+	}
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	bool value = connectivity->persistence;
+
+	k_mutex_unlock(&lock);
+
+	return value;
+}
+
+int net_if_set_conn_persistence(struct net_if *iface, bool persistent)
+{
+	struct net_if_conn *connectivity = net_if_get_conn(iface);
+
+	if (!connectivity) {
+		return -ENOTSUP;
+	}
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	connectivity->persistence = persistent;
+
+	k_mutex_unlock(&lock);
+
+	return 0;
+}
+
+int net_if_get_conn_timeout(struct net_if *iface)
+{
+	const struct net_if_conn *connectivity = net_if_get_conn(iface);
+
+	if (!connectivity) {
+		return false;
+	}
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	int value = connectivity->timeout;
+
+	k_mutex_unlock(&lock);
+
+	return value;
+}
+
+int net_if_set_conn_timeout(struct net_if *iface, int timeout)
+{
+	struct net_if_conn *connectivity = net_if_get_conn(iface);
+
+	if (!connectivity) {
+		return -ENOTSUP;
+	}
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	connectivity->timeout = timeout;
+
+	k_mutex_unlock(&lock);
+
+	return 0;
 }
 
 #ifdef CONFIG_NET_POWER_MANAGEMENT
